@@ -123,6 +123,137 @@ template <typename PrimitiveContainer, typename PrimitiveNode>
 	}
 }
 
+// Whether the slot holds a box child that refits must wait for. The members of a merged node share one child.
+template <typename Node>
+[[nodiscard]] HIPRT_DEVICE HIPRT_INLINE bool isTrackedBoxChild( const Node& node, const uint32_t slot )
+{
+	bool tracked = node.getChildType( slot ) == BoxType;
+	if constexpr ( Rtip31Emulation ) tracked = tracked && !node.isMergedSlot( slot );
+	return tracked;
+}
+
+// The node index to look up the K-DOP of a slot: non-first members of a merged node have their own K-DOP.
+template <typename Node>
+[[nodiscard]] HIPRT_DEVICE HIPRT_INLINE uint32_t
+getSlotKdopNodeIndex( const Node& node, const uint32_t slot, const uint32_t* memberKdopBases )
+{
+	const uint32_t childIndex = node.getChildIndex( slot );
+	if constexpr ( Rtip31Emulation )
+	{
+		if ( memberKdopBases != nullptr && node.isMergedSlot( slot ) )
+		{
+			uint32_t memberIndex = 0;
+			for ( uint32_t s = slot; s > 0 && node.isMergedSlot( s ); --s )
+				memberIndex++;
+			return encodeNodeIndex( memberKdopBases[getNodeAddr( childIndex )] + memberIndex - 1, BoxType );
+		}
+	}
+	return childIndex;
+}
+
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+// Lists the leaves of a subtree, the order being the one of a depth-first walk with right children appended. Returns the
+// number of leaves, or maxCount + 1 as soon as the subtree is known to have more than maxCount.
+template <typename BinaryNode>
+[[nodiscard]] HIPRT_DEVICE HIPRT_INLINE uint32_t
+collectLeafReferences( const BinaryNode* binaryNodes, const uint32_t rootIndex, const uint32_t maxCount, uint32_t* indices )
+{
+	uint32_t count = 1;
+	indices[0]     = rootIndex;
+	for ( uint32_t i = 0; i < count; )
+	{
+		if ( isLeafNode( indices[i] ) )
+		{
+			i++;
+			continue;
+		}
+
+		if ( count == maxCount ) return maxCount + 1;
+
+		const BinaryNode node = binaryNodes[getNodeAddr( indices[i] )];
+		indices[i]            = node[0];
+		indices[count++]      = node[1];
+	}
+	return count;
+}
+
+[[nodiscard]] HIPRT_DEVICE HIPRT_INLINE uint32_t selectSetBit( uint32_t mask, const uint32_t n )
+{
+	for ( uint32_t i = 0; i < n; ++i )
+		mask &= mask - 1;
+	return hiprt::ffsll( mask ) - 1;
+}
+
+// Moves the box children to the first slots, which merged slots must be contiguous for, and greedily groups consecutive
+// leaf-only box children that fit in one node. The size of a box child is the number of slots it would fill.
+template <typename BinaryNode>
+HIPRT_DEVICE HIPRT_INLINE void groupBoxChildren(
+	const BinaryNode* binaryNodes,
+	const uint32_t    subwarpBase,
+	const uint32_t    sublaneIndex,
+	const bool        active,
+	const bool        canMerge,
+	uint32_t&         childIndex,
+	Aabb&             childBox,
+	uint32_t&         numBoxChildren,
+	uint32_t&         leaderMask,
+	uint32_t&         memberMask )
+{
+	constexpr uint32_t SlotCount = BoxNode::BranchingFactor;
+
+	const bool internal = isInternalNode( childIndex ) && !isFatLeafNode( childIndex );
+
+	sync_warp();
+
+	const uint32_t boxMask  = static_cast<uint32_t>( ( hiprt::ballot( active && internal ) >> subwarpBase ) & 0xff );
+	const uint32_t leafMask = static_cast<uint32_t>( ( hiprt::ballot( active && !internal ) >> subwarpBase ) & 0xff );
+
+	numBoxChildren = hiprt::popc( boxMask );
+
+	uint32_t sourceSlot = sublaneIndex;
+	if ( active )
+	{
+		sourceSlot = sublaneIndex < numBoxChildren ? selectSetBit( boxMask, sublaneIndex )
+		                                           : selectSetBit( leafMask, sublaneIndex - numBoxChildren );
+	}
+
+	sync_warp();
+
+	childIndex = shfl( childIndex, subwarpBase + sourceSlot );
+	childBox   = shflAabb( childBox, subwarpBase + sourceSlot );
+
+	uint32_t size = SlotCount;
+	if ( canMerge && sublaneIndex < numBoxChildren )
+	{
+		uint32_t indices[SlotCount];
+		size = hiprt::min( collectLeafReferences( binaryNodes, childIndex, SlotCount, indices ), SlotCount );
+	}
+
+	sync_warp();
+
+	uint32_t sizes[SlotCount];
+	HIPRT_UNROLL
+	for ( uint32_t slot = 0; slot < SlotCount; ++slot )
+		sizes[slot] = shfl( size, subwarpBase + slot );
+
+	memberMask = 0;
+	if ( canMerge )
+	{
+		uint32_t merged = 0;
+		for ( uint32_t slot = 0; slot < numBoxChildren; ++slot )
+		{
+			merged += sizes[slot];
+			if ( slot == 0 || merged > SlotCount )
+				merged = sizes[slot];
+			else
+				memberMask |= 1u << slot;
+		}
+	}
+
+	leaderMask = ( ( 1u << numBoxChildren ) - 1u ) & ~memberMask;
+}
+#endif
+
 template <auto IsLeafNode, typename BinaryNode>
 HIPRT_DEVICE HIPRT_INLINE void openNodes(
 	const BinaryNode*    binaryNodes,
@@ -676,7 +807,7 @@ FitBounds( const Header* header, const PrimitiveContainer& primitives, const Pri
 	{
 		node       = boxNodes[index];
 		childCount = node.getChildCount();
-		internal   = sublaneIndex < childCount && node.getChildType( sublaneIndex ) == BoxType;
+		internal   = sublaneIndex < childCount && isTrackedBoxChild( node, sublaneIndex );
 	}
 
 	uint32_t internalCount = hiprt::popcll( hiprt::ballot( internal ) & subwarpMask );
@@ -714,7 +845,7 @@ FitBounds( const Header* header, const PrimitiveContainer& primitives, const Pri
 		{
 			node       = boxNodes[index];
 			childCount = node.getChildCount();
-			internal   = sublaneIndex < childCount && node.getChildType( sublaneIndex ) == BoxType;
+			internal   = sublaneIndex < childCount && isTrackedBoxChild( node, sublaneIndex );
 		}
 
 		internalCount = hiprt::popcll( hiprt::ballot( internal ) & subwarpMask );
@@ -769,7 +900,6 @@ HIPRT_KERNEL void FitBounds_InstanceList_hiprtFrameMatrix_rtip31_InstanceNode(
 	FitBounds( header, primitives, primNodes, boxNodes );
 }
 
-// assuming that OBBs are AMD specific, there are no warp syncs
 template <typename PrimitiveContainer, typename PrimitiveNode, typename OrientedBoxNode, typename Header>
 HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 	const Header*             header,
@@ -777,7 +907,8 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 	const PrimitiveNode*      primNodes,
 	OrientedBoxNode*          boxNodes,
 	Kdop*                     kdops,
-	uint32_t*                 updateCounters )
+	uint32_t*                 updateCounters,
+	uint32_t*                 memberKdopBases = nullptr )
 {
 	const uint32_t threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
 	const uint32_t laneIndex   = threadIdx.x % WarpSize;
@@ -788,7 +919,7 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 
 	OrientedBoxNode node       = boxNodes[index];
 	uint32_t        childCount = node.getChildCount();
-	bool            internal   = laneIndex < childCount && node.getChildType( laneIndex ) == BoxType;
+	bool            internal   = laneIndex < childCount && isTrackedBoxChild( node, laneIndex );
 
 	uint32_t internalCount = hiprt::popcll( hiprt::ballot( internal ) );
 
@@ -796,23 +927,59 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 
 	while ( hiprt::any( !done ) )
 	{
+		sync_warp();
 		__threadfence();
 
 		if ( index > 0 )
 		{
+			// The parent of a merged node keeps one box per member, so each member needs its own K-DOP. The first one uses the
+			// K-DOP of the node, the others are stored after the K-DOPs of all the nodes.
+			uint32_t memberCount = 1;
+			uint32_t memberBase  = InvalidValue;
+			if constexpr ( Rtip31Emulation )
+			{
+				if ( memberKdopBases != nullptr ) memberCount = hiprt::max( hiprt::popc( node.getLeafStartMask() ), 1u );
+				if ( memberCount > 1 )
+				{
+					if ( laneIndex == 0 )
+					{
+						const uint32_t nodeCount = header->m_boxNodeCount;
+						memberBase               = nodeCount + atomicAdd( &memberKdopBases[nodeCount], memberCount - 1 );
+						memberKdopBases[index]   = memberBase;
+					}
+
+					sync_warp();
+
+					memberBase = shfl( memberBase, 0 );
+				}
+			}
+
 			uint32_t minIndexLane = InvalidValue;
 			float    minAreaLane  = FltMax;
 			for ( uint32_t j = laneIndex; j <= RotationCount; j += WarpSize )
 			{
 				Aabb obb;
+				Aabb memberObbs[MaxMergedMembers];
 				for ( uint32_t i = 0; i < childCount; ++i )
 				{
 					const Aabb     childBox   = node.getChildBox( i );
-					const uint32_t childIndex = node.getChildIndex( i );
-					obb.grow( getNodeObb( j, childIndex, childBox, primitives, primNodes, kdops ).aabb() );
+					const uint32_t childIndex = getSlotKdopNodeIndex( node, i, memberKdopBases );
+					const Aabb     childObb   = getNodeObb( j, childIndex, childBox, primitives, primNodes, kdops ).aabb();
+					obb.grow( childObb );
+					if ( memberCount > 1 )
+						memberObbs[hiprt::popc( node.getLeafStartMask() & ( ( 2u << i ) - 1u ) ) - 1].grow( childObb );
 				}
 
-				kdops[index].m_boxes[j] = obb;
+				if ( memberCount > 1 )
+				{
+					kdops[index].m_boxes[j] = memberObbs[0];
+					for ( uint32_t member = 1; member < memberCount; ++member )
+						kdops[memberBase + member - 1].m_boxes[j] = memberObbs[member];
+				}
+				else
+				{
+					kdops[index].m_boxes[j] = obb;
+				}
 
 				if ( minAreaLane > obb.area() )
 				{
@@ -820,6 +987,8 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 					minIndexLane = j;
 				}
 			}
+
+			sync_warp();
 
 			const float    minArea     = warpMin( minAreaLane );
 			const uint32_t minIndex    = hiprt::ffsll( hiprt::ballot( minAreaLane == minArea ) ) - 1;
@@ -832,9 +1001,13 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 			{
 				childIndex = node.getChildIndex( laneIndex );
 				childRange = node.getChildRange( laneIndex );
-				childBox =
-					getNodeObb( matrixIndex, childIndex, node.getChildBox( laneIndex ), primitives, primNodes, kdops ).aabb();
+
+				const Aabb     slotBox       = node.getChildBox( laneIndex );
+				const uint32_t kdopNodeIndex = getSlotKdopNodeIndex( node, laneIndex, memberKdopBases );
+				childBox = getNodeObb( matrixIndex, kdopNodeIndex, slotBox, primitives, primNodes, kdops ).aabb();
 			}
+
+			sync_warp();
 
 			const Aabb nodeBox = warpUnion( childBox );
 
@@ -866,13 +1039,17 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 
 		node       = boxNodes[index];
 		childCount = node.getChildCount();
-		internal   = laneIndex < childCount && node.getChildType( laneIndex ) == BoxType;
+		internal   = laneIndex < childCount && isTrackedBoxChild( node, laneIndex );
+
+		sync_warp();
 
 		internalCount = hiprt::popcll( hiprt::ballot( internal ) );
 
 		__threadfence();
 
 		if ( laneIndex == 0 && atomicAdd( &updateCounters[index], 1 ) < internalCount - 1 ) done = true;
+
+		sync_warp();
 
 		done = shfl( done, 0 );
 	}
@@ -884,9 +1061,10 @@ HIPRT_KERNEL void FitOrientedBounds_TriangleMesh_rtip31_TrianglePacketNode_rtip3
 	const rtip31::TrianglePacketNode* primNodes,
 	rtip31::BoxNode*                  boxNodes,
 	Kdop*                             kdops,
-	uint32_t*                         updateCounters )
+	uint32_t*                         updateCounters,
+	uint32_t*                         memberKdopBases )
 {
-	FitOrientedBounds( header, primitives, primNodes, boxNodes, kdops, updateCounters );
+	FitOrientedBounds( header, primitives, primNodes, boxNodes, kdops, updateCounters, memberKdopBases );
 }
 
 HIPRT_KERNEL void FitOrientedBounds_AabbList_CustomNode_rtip31_BoxNode(
@@ -962,7 +1140,8 @@ HIPRT_DEVICE HIPRT_INLINE void ComputeFatLeaves(
 	const uint32_t* parentAddrs,
 	BinaryNode*     binaryNodes,
 	uint32_t*       triangleCounts,
-	uint32_t*       updateCounters )
+	uint32_t*       updateCounters,
+	const uint32_t  maxFatLeafSize )
 {
 	uint32_t nodeIndex = index;
 
@@ -993,7 +1172,7 @@ HIPRT_DEVICE HIPRT_INLINE void ComputeFatLeaves(
 			else
 				childTriCount = triangleCounts[binaryNode.getChildAddr( i )];
 
-			if ( childTriCount <= getMaxFatLeafSize( Rtip ) ) binaryNode.setChildFatLeafFlag( i );
+			if ( childTriCount <= maxFatLeafSize ) binaryNode.setChildFatLeafFlag( i );
 
 			triangleCount += childTriCount;
 		}
@@ -1021,10 +1200,11 @@ HIPRT_KERNEL void ComputeFatLeaves_ScratchNode(
 	const uint32_t* parentAddrs,
 	ScratchNode*    binaryNodes,
 	uint32_t*       triangleCounts,
-	uint32_t*       updateCounters )
+	uint32_t*       updateCounters,
+	const uint32_t  maxFatLeafSize )
 {
 	const uint32_t index = threadIdx.x + blockIdx.x * blockDim.x;
-	ComputeFatLeaves( index, leafCount, parentAddrs, binaryNodes, triangleCounts, updateCounters );
+	ComputeFatLeaves( index, leafCount, parentAddrs, binaryNodes, triangleCounts, updateCounters, maxFatLeafSize );
 }
 
 HIPRT_KERNEL void ComputeFatLeaves_ApiNode(
@@ -1032,10 +1212,11 @@ HIPRT_KERNEL void ComputeFatLeaves_ApiNode(
 	const uint32_t* parentAddrs,
 	ApiNode*        binaryNodes,
 	uint32_t*       triangleCounts,
-	uint32_t*       updateCounters )
+	uint32_t*       updateCounters,
+	const uint32_t  maxFatLeafSize )
 {
 	const uint32_t index = threadIdx.x + blockIdx.x * blockDim.x;
-	ComputeFatLeaves( index, leafCount, parentAddrs, binaryNodes, triangleCounts, updateCounters );
+	ComputeFatLeaves( index, leafCount, parentAddrs, binaryNodes, triangleCounts, updateCounters, maxFatLeafSize );
 }
 
 template <typename PrimitiveNode, typename BinaryNode, typename Header>
@@ -1048,7 +1229,8 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 	Header*              header,
 	BoxNode*             boxNodes,
 	ConversionTask*      taskQueue,
-	uint32_t*            referenceIndices )
+	uint32_t*            referenceIndices,
+	[[maybe_unused]] const uint32_t nodeMerging = 0 )
 {
 	const uint32_t laneIndex    = threadIdx.x % WarpSize;
 	const uint32_t taskIndex    = index / BoxNode::BranchingFactor;
@@ -1095,7 +1277,38 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 		nodeIndex                     = shfl( nodeIndex, valid ? laneIndex : firstValidLane );
 
 		BinaryNode binaryNode = binaryNodes[getNodeAddr( nodeIndex )];
+
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+		Aabb       nodeBox       = binaryNode.m_box;
+		uint32_t   leafStartMask = 0;
+		const bool blockTask     = valid && ( nodeIndex & BlockTaskBit ) != 0;
+		if ( blockTask )
+		{
+			// The parent left the list of members in the memory of this node, which is only written below.
+			const uint32_t* members = reinterpret_cast<const uint32_t*>( &boxNodes[nodeAddr] );
+
+			uint32_t leaves[BoxNode::BranchingFactor];
+			nodeBox.reset();
+			childCount = 0;
+			for ( uint32_t member = 0; member < MaxMergedMembers && members[member] != InvalidValue; ++member )
+			{
+				nodeBox.grow( getNodeBox( members[member], binaryNodes, references ) );
+				leafStartMask |= 1u << childCount;
+				childCount += collectLeafReferences(
+					binaryNodes, members[member], BoxNode::BranchingFactor - childCount, &leaves[childCount] );
+			}
+
+			if ( sublaneIndex < childCount )
+			{
+				childIndex = leaves[sublaneIndex];
+				childBox   = getNodeBox( childIndex, binaryNodes, references );
+			}
+		}
+
+		if ( !blockTask && sublaneIndex < 2 )
+#else
 		if ( sublaneIndex < 2 )
+#endif
 		{
 			childIndex = binaryNode[sublaneIndex];
 			childBox   = getNodeBox( binaryNode[sublaneIndex], binaryNodes, references );
@@ -1111,6 +1324,71 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 
 		const bool active = valid && sublaneIndex < childCount;
 
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+		const uint32_t subwarpBase    = subwarpIndex * BoxNode::BranchingFactor;
+		uint32_t       numBoxChildren = 0;
+		uint32_t       leaderMask     = 0;
+		uint32_t       memberMask     = 0;
+		uint32_t       childRange     = InvalidValue;
+		if ( nodeMerging != 0 )
+		{
+			groupBoxChildren(
+				binaryNodes,
+				subwarpBase,
+				sublaneIndex,
+				active,
+				nodeAddr != 0,
+				childIndex,
+				childBox,
+				numBoxChildren,
+				leaderMask,
+				memberMask );
+		}
+
+		const bool     internal     = isInternalNode( childIndex ) && !isFatLeafNode( childIndex );
+		const bool     leader       = nodeMerging == 0 || ( ( leaderMask >> sublaneIndex ) & 1u ) != 0;
+		const uint32_t childAddr    = warpOffset( active && internal && leader, &header->m_boxNodeCount );
+		const uint32_t internalBase = shfl( childAddr, subwarpBase );
+
+		uint32_t slotChildren[MaxMergedMembers];
+		if ( nodeMerging != 0 )
+		{
+			sync_warp();
+			HIPRT_UNROLL
+			for ( uint32_t k = 0; k < MaxMergedMembers; ++k )
+				slotChildren[k] =
+					shfl( childIndex, subwarpBase + hiprt::min( sublaneIndex + k, BoxNode::BranchingFactor - 1 ) );
+		}
+
+		if ( active && internal )
+		{
+			if ( leader )
+			{
+				uint32_t taskNodeIndex = childIndex;
+				if ( ( ( memberMask >> ( sublaneIndex + 1 ) ) & 1u ) != 0 )
+				{
+					uint32_t memberCount = 1;
+					while ( memberCount < MaxMergedMembers && ( ( memberMask >> ( sublaneIndex + memberCount ) ) & 1u ) != 0 )
+						memberCount++;
+
+					// The node is written by its own task only: use its memory to pass the members.
+					uint32_t* members = reinterpret_cast<uint32_t*>( &boxNodes[childAddr] );
+					for ( uint32_t k = 0; k < MaxMergedMembers; ++k )
+						members[k] = k < memberCount ? slotChildren[k] : InvalidValue;
+					__threadfence();
+
+					taskNodeIndex |= BlockTaskBit;
+				}
+				taskQueue[childAddr].atomic_store( ConversionTask( taskNodeIndex, childAddr, nodeAddr ) );
+			}
+
+			childIndex = encodeNodeIndex( childAddr, getNodeType( childIndex ) );
+			__threadfence();
+
+			if ( nodeMerging != 0 )
+				childRange = sublaneIndex + 1 == numBoxChildren || ( ( leaderMask >> ( sublaneIndex + 1 ) ) & 1u ) != 0 ? 1 : 0;
+		}
+#else
 		const bool     internal     = isInternalNode( childIndex ) && !isFatLeafNode( childIndex );
 		const uint32_t childAddr    = warpOffset( active && internal, &header->m_boxNodeCount );
 		const uint32_t internalBase = shfl( childAddr, subwarpIndex * BoxNode::BranchingFactor );
@@ -1120,6 +1398,7 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 			childIndex = encodeNodeIndex( childAddr, getNodeType( childIndex ) );
 			__threadfence();
 		}
+#endif
 
 		const bool fatLeaf  = isFatLeafNode( childIndex ) && !isLeafNode( childIndex );
 		const bool leaf     = isLeafNode( childIndex );
@@ -1149,6 +1428,21 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 			else
 			{
 				if ( fatLeaf ) childIndex = encodeNodeIndex( getNodeAddr( childIndex ), TriangleType );
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+				boxNodes[nodeAddr].init(
+					sublaneIndex,
+					parentAddr,
+					childCount,
+					leafType,
+					leafMask,
+					internalBase,
+					0,
+					childIndex,
+					childBox,
+					nodeBox,
+					childRange );
+				if ( nodeMerging != 0 && sublaneIndex == 0 ) boxNodes[nodeAddr].m_leafStartMask = leafStartMask;
+#else
 				boxNodes[nodeAddr].init(
 					sublaneIndex,
 					parentAddr,
@@ -1160,6 +1454,7 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 					childIndex,
 					childBox,
 					binaryNode.m_box );
+#endif
 				if ( fatLeaf ) childIndex = encodeNodeIndex( getNodeAddr( childIndex ), BoxType ) | FatLeafBit;
 			}
 		}
@@ -1260,11 +1555,21 @@ HIPRT_KERNEL void Collapse_rtip31_TrianglePacketNode_ScratchNode(
 	GeomHeader*          header,
 	BoxNode*             boxNodes,
 	ConversionTask*      taskQueue,
-	uint32_t*            referenceIndices )
+	uint32_t*            referenceIndices,
+	const uint32_t       nodeMerging )
 {
 	const uint32_t index = threadIdx.x + blockIdx.x * blockDim.x;
 	Collapse<rtip31::TrianglePacketNode>(
-		index, maxBoxNodeCount, referenceCount, binaryNodes, references, header, boxNodes, taskQueue, referenceIndices );
+		index,
+		maxBoxNodeCount,
+		referenceCount,
+		binaryNodes,
+		references,
+		header,
+		boxNodes,
+		taskQueue,
+		referenceIndices,
+		nodeMerging );
 }
 
 HIPRT_KERNEL void Collapse_CustomNode_ScratchNode(
@@ -1335,11 +1640,21 @@ HIPRT_KERNEL void Collapse_rtip31_TrianglePacketNode_ApiNode(
 	GeomHeader*          header,
 	BoxNode*             boxNodes,
 	ConversionTask*      taskQueue,
-	uint32_t*            referenceIndices )
+	uint32_t*            referenceIndices,
+	const uint32_t       nodeMerging )
 {
 	const uint32_t index = threadIdx.x + blockIdx.x * blockDim.x;
 	Collapse<rtip31::TrianglePacketNode>(
-		index, maxBoxNodeCount, referenceCount, binaryNodes, references, header, boxNodes, taskQueue, referenceIndices );
+		index,
+		maxBoxNodeCount,
+		referenceCount,
+		binaryNodes,
+		references,
+		header,
+		boxNodes,
+		taskQueue,
+		referenceIndices,
+		nodeMerging );
 }
 
 HIPRT_KERNEL void Collapse_CustomNode_ApiNode(
@@ -1458,7 +1773,6 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 	node.patchParent( primNodeBase );
 }
 
-// assuming that triangle packets are AMD specific, there are no warp syncs
 HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 	const uint32_t              index,
 	const uint32_t              taskCount,
@@ -1489,6 +1803,7 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 	uint32_t primNodeCount = 0;
 
 	const uint32_t rangeBase = rangeOffset;
+	sync_warp();
 	while ( hiprt::ballot( taskIndex < taskCount && rangeOffset < rangeBase + rangeSize ) )
 	{
 		rtip31::TrianglePacketData packet{};
@@ -1533,6 +1848,8 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 				}
 			}
 
+			sync_subwarp( subwarpIndex, rtip31::TrianglePacketNode::LanesPerLeafPacketTask );
+
 			const uint32_t newVertMask = ( hiprt::ballot( !contains && valid ) >>
 			                               ( rtip31::TrianglePacketNode::LanesPerLeafPacketTask * subwarpIndex ) ) &
 			                             0xf;
@@ -1559,6 +1876,8 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 
 		// count packets
 		if ( taskIndex < taskCount && packet.m_triPairCount > 0 ) primNodeCount++;
+
+		sync_warp();
 	}
 
 	const uint32_t primNodeBase = warpOffset(
@@ -1571,6 +1890,7 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 
 	rangeOffset = rangeBase;
 
+	sync_warp();
 	while ( hiprt::ballot( taskIndex < taskCount && rangeOffset < rangeBase + rangeSize ) )
 	{
 		rtip31::TrianglePacketData packet{};
@@ -1618,6 +1938,8 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 				}
 			}
 
+			sync_subwarp( subwarpIndex, rtip31::TrianglePacketNode::LanesPerLeafPacketTask );
+
 			const uint32_t newVertMask = ( hiprt::ballot( !contains && valid ) >>
 			                               ( rtip31::TrianglePacketNode::LanesPerLeafPacketTask * subwarpIndex ) ) &
 			                             0xf;
@@ -1645,6 +1967,8 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 				vertexIndexInPacket       = oldVertCount + hiprt::popc( newVertMask & vertexMask );
 				triPacketCache[subwarpIndex].m_vertexIndices[vertexIndexInPacket] = component( indices, sublaneIndex );
 			}
+
+			sync_subwarp( subwarpIndex, rtip31::TrianglePacketNode::LanesPerLeafPacketTask );
 
 			// shuffle vertex indices in packet
 			uint4 vertexIndicesInPacket;
@@ -1681,10 +2005,14 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 		}
 		__threadfence_block();
 
+		sync_warp();
+
 		// build packets
 		uint64_t packetMask = hiprt::ballot( taskIndex < taskCount && packet.m_triPairCount > 0 && sublaneIndex == 0 );
 		while ( packetMask )
 		{
+			sync_warp();
+
 			const uint32_t halfWarpIndex = laneIndex / 16;
 			const uint32_t halfLaneIndex = laneIndex % 16;
 
@@ -1695,6 +2023,9 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 			const bool     secondValid    = packetMask != 0;
 			if ( secondValid ) packetMask ^= 1ull << broadcastLane1;
 
+			// Two groups of 16 lanes build one packet each; the remaining lanes of a wider warp stay idle.
+			const bool buildsPacket = halfWarpIndex == 0 || ( halfWarpIndex == 1 && secondValid );
+
 			const uint32_t broadcastLane           = ( halfWarpIndex == 0 ) ? broadcastLane0 : broadcastLane1;
 			const uint32_t broadcastSubwarpIndex   = broadcastLane / rtip31::TrianglePacketNode::LanesPerLeafPacketTask;
 			const uint32_t broadcastPrimNodeOffset = shfl( primNodeOffset, broadcastLane );
@@ -1703,7 +2034,7 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 			// store current packet data to registers
 			rtip31::TrianglePairData halfLaneTriPairData;
 			uint32_t                 halfLaneVertexIndex;
-			if ( halfWarpIndex == 0 || secondValid )
+			if ( buildsPacket )
 			{
 				if ( halfLaneIndex < 2 * broadcastPacket.m_triPairCount )
 					halfLaneTriPairData = triPacketCache[broadcastSubwarpIndex].m_triPairData[halfLaneIndex / 2];
@@ -1714,14 +2045,14 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 			// reuse shared memory
 			rtip31::TrianglePacketNode& triPacketNode =
 				*reinterpret_cast<rtip31::TrianglePacketNode*>( &triPacketCache[broadcastSubwarpIndex] );
-			if ( halfWarpIndex == 0 || secondValid )
+			if ( buildsPacket )
 			{
 				triPacketNode.m_data[halfLaneIndex + 0 * 16] = 0;
 				triPacketNode.m_data[halfLaneIndex + 1 * 16] = 0;
 			}
 
 			// build two packets at once
-			if ( halfWarpIndex == 0 || secondValid )
+			if ( buildsPacket )
 			{
 				// write header
 				rtip31::TrianglePacketHeader hdr = broadcastPacket.buildHeader();
@@ -1751,7 +2082,7 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 			}
 
 			// write packet
-			if ( ( halfWarpIndex == 0 || secondValid ) )
+			if ( buildsPacket )
 			{
 				primNodes[broadcastPrimNodeOffset].m_data[halfLaneIndex + 0 * 16] =
 					triPacketNode.m_data[halfLaneIndex + 0 * 16];
@@ -1761,6 +2092,8 @@ HIPRT_DEVICE HIPRT_INLINE void PackLeaves(
 		}
 
 		if ( taskIndex < taskCount && packet.m_triPairCount > 0 ) primNodeOffset++;
+
+		sync_warp();
 	}
 
 	// patch parent

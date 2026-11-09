@@ -49,6 +49,10 @@ static constexpr uint32_t FatLeafBit    = 1u << 31u;
 static constexpr uint32_t RangeEndBit   = 1u << 31u;
 static constexpr uint32_t RangeStartBit = 1u << 30u;
 
+// Marks a collapse task that builds a merged node. Fat leaves are never collapse tasks, so their bit is free.
+static constexpr uint32_t BlockTaskBit     = FatLeafBit;
+static constexpr uint32_t MaxMergedMembers = 4;
+
 static constexpr float Ci = 1.0f;
 static constexpr float Ct = 1.0f;
 
@@ -293,7 +297,7 @@ struct ConversionTask
 	[[nodiscard]] HIPRT_DEVICE HIPRT_INLINE ConversionTask atomic_load() const
 	{
 		ConversionTask task{};
-#if HIPRT_RTIP >= 31
+#if HIPRT_RTIP >= 31 && !defined( __CUDACC__ )
 		task.m_nodeAddr   = __hip_atomic_load( &m_nodeAddr, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT );
 		task.m_nodeIndex  = __hip_atomic_load( &m_nodeIndex, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT );
 		task.m_parentAddr = __hip_atomic_load( &m_parentAddr, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT );
@@ -305,7 +309,7 @@ struct ConversionTask
 
 	HIPRT_DEVICE HIPRT_INLINE void atomic_store( const ConversionTask& task )
 	{
-#if HIPRT_RTIP >= 31
+#if HIPRT_RTIP >= 31 && !defined( __CUDACC__ )
 		__hip_atomic_store( &m_nodeAddr, task.m_nodeAddr, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT );
 		__hip_atomic_store( &m_nodeIndex, task.m_nodeIndex, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT );
 		__hip_atomic_store( &m_parentAddr, task.m_parentAddr, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT );
@@ -912,6 +916,15 @@ struct alignas( DefaultAlignment ) BoxNode
 		return m_childInfos[i].m_nodeRange;
 	}
 
+	// A box slot whose predecessor has an empty range points to the same child: it is a member of a merged node, but not
+	// its first one.
+	[[nodiscard]] HIPRT_HOST_DEVICE HIPRT_INLINE bool isMergedSlot( const uint32_t i ) const
+	{
+		return i > 0 && getChildType( i ) == BoxType && getChildType( i - 1 ) == BoxType && getChildRange( i - 1 ) == 0;
+	}
+
+	[[nodiscard]] HIPRT_HOST_DEVICE HIPRT_INLINE uint32_t getLeafStartMask() const { return m_leafStartMask; }
+
 	HIPRT_HOST_DEVICE HIPRT_INLINE void patchParent( const uint32_t primNodeBase )
 	{
 		setPrimNodeBase( primNodeBase );
@@ -961,7 +974,8 @@ struct alignas( DefaultAlignment ) BoxNode
 	uint8_t : 4;
 	uint8_t  m_childCountMinusOne : 4;
 	uint32_t m_matrixId : 7;
-	uint32_t : 25;
+	uint32_t m_leafStartMask : 8; // Merged nodes only: bit i is set if the leaf in slot i starts the leaves of a member.
+	uint32_t : 17;
 	ChildInfo m_childInfos[8] = {};
 };
 HIPRT_STATIC_ASSERT( sizeof( BoxNode ) == 128 );

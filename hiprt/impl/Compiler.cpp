@@ -580,6 +580,8 @@ void Compiler::addCommonOpts( const Context& context, std::vector<const char*>& 
 		opts.push_back( m_rtipStr.c_str() );
 	}
 
+	if constexpr ( Rtip31Emulation ) opts.push_back( "-DHIPRT_FORCE_RTIP31_EMULATION" );
+
 	// Name the target explicitly rather than letting the runtime compiler infer it from whichever
 	// context happens to be current. Inference works when the context is set, which is why this has
 	// gone unnoticed, but it leaves the produced code object depending on ambient state, and a
@@ -744,6 +746,11 @@ std::string Compiler::getCacheFilename(
 		for ( const auto& option : options.value() )
 			optionHash += option + std::string( "\n" );
 	}
+
+	// The traversal library is not part of the key: without this, a build with the emulation would load the kernels
+	// cached by a build without it, and the other way around.
+	if constexpr ( Rtip31Emulation ) optionHash += "rtip31Emulation";
+
 	optionHash = Utility::format( "%08x", Utility::hashString( optionHash ) );
 
 	return moduleHash + "-" + optionHash + ".v." + deviceName + "." + driverVersion + "_" +

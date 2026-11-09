@@ -27,6 +27,12 @@ vsVersionRange = None
 # use the resolved VS install's default toolset.
 vcToolsetVersion = None
 
+# Set by --forceRtip31Emulation.
+forceRtip31Emulation = False
+
+def getRtip31EmulationDefine():
+    return ' -DHIPRT_FORCE_RTIP31_EMULATION' if forceRtip31Emulation else ''
+
 def getVersion():
     f = open(root + 'version.txt', 'r')
     HIPRT_MAJOR_VERSION = int(f.readline())
@@ -137,12 +143,12 @@ def compileAmd():
 
     # compile custom function table
     hiprt_custom_func = 'hiprt' + hiprt_ver + '_' + hip_version + '_custom_func_table.bc'
-    cmd = hipccpath + ' -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../ ' + osDef +  ' -ffast-math ../../test/bitcodes/custom_func_table.cpp' + parallel_jobs_flag + ' -o ' + hiprt_custom_func
+    cmd = hipccpath + ' -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../ ' + osDef + getRtip31EmulationDefine() +  ' -ffast-math ../../test/bitcodes/custom_func_table.cpp' + parallel_jobs_flag + ' -o ' + hiprt_custom_func
     compileScript('compiling ', cmd, hiprt_custom_func)
 
     # compiling unit test
     hiprt_unit_test = 'hiprt' + hiprt_ver + '_' + hip_version + '_unit_test'+ postfix
-    cmd = hipccpath + ' -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../ ' + osDef +  ' -ffast-math -D BLOCK_SIZE=64 -D SHARED_STACK_SIZE=16 ../../test/bitcodes/unit_test.cpp' + parallel_jobs_flag + ' -o ' + hiprt_unit_test
+    cmd = hipccpath + ' -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../ ' + osDef + getRtip31EmulationDefine() +  ' -ffast-math -D BLOCK_SIZE=64 -D SHARED_STACK_SIZE=16 ../../test/bitcodes/unit_test.cpp' + parallel_jobs_flag + ' -o ' + hiprt_unit_test
     compileScript('compiling ', cmd, hiprt_unit_test)
 
     # linking
@@ -205,6 +211,7 @@ parser = optparse.OptionParser()
 parser.add_option('-a', '--amd', dest='amd_platform', help='Compile for AMD', action='store_true', default=True)
 parser.add_option('--no-amd'   , dest='amd_platform', help='Do not compile for AMD', action='store_false' )
 parser.add_option('-n', '--nvidia', dest='nv_platform', help='Compile for Nvidia', action='store_true', default=False)
+parser.add_option('--forceRtip31Emulation', dest='forceRtip31Emulation', help='Use the RTIP 3.1 BVH format on every GPU, and trace it in software', action='store_true', default=False)
 
 # Add the optional hipSdkPath argument
 parser.add_option(
@@ -237,6 +244,8 @@ parser.add_option(
     )
 
 (options, args) = parser.parse_args()
+
+forceRtip31Emulation = options.forceRtip31Emulation
 
 
 # Resolve the requested Visual Studio installation / MSVC toolset (CLI args, else

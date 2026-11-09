@@ -16,6 +16,7 @@ option(NO_UNITTEST "Don't build unit tests" OFF)
 option(COMPILED_COMPRESSION "enable compression of compiled kernels" ON) # this argument is only used if BAKE_COMPILED_KERNEL is enabled -- advised to let it 'ON' as it's the path tested by the HIPRT team.
 
 option(FORCE_DISABLE_CUDA "By default Cuda support is automatically added if a Cuda install is detected. Turn this flag to ON to force Cuda to be disabled." OFF)
+option(FORCE_RTIP31_EMULATION "Use the RTIP 3.1 BVH format on every GPU, and trace it in software instead of with the ray tracing instructions." OFF)
 
 
 # Python is only needed by the kernel compilation/baking scripts.
@@ -315,6 +316,10 @@ add_definitions(-D__USE_HIP__)
 # it helps AMD to maintain both a public and a private repo for experimentation.
 add_definitions(-DHIPRT_PUBLIC_REPO)
 
+if(FORCE_RTIP31_EMULATION)
+	add_definitions(-DHIPRT_FORCE_RTIP31_EMULATION)
+endif()
+
 
 if (NOT FORCE_DISABLE_CUDA)
 	# Enable CUDA if possible
@@ -412,6 +417,16 @@ if(PRECOMPILE)
 		set(CUDA_OPTION "--nvidia")
 	endif()
 
+	if(FORCE_RTIP31_EMULATION)
+		set(RTIP31_EMULATION_OPTION "--forceRtip31Emulation")
+	else()
+		set(RTIP31_EMULATION_OPTION "")
+	endif()
+
+	# The kernels must be compiled again when the option changes. file(GENERATE) only touches this file in that case.
+	set(RTIP31_EMULATION_STAMP "${CMAKE_BINARY_DIR}/rtip31_emulation.stamp")
+	file(GENERATE OUTPUT "${RTIP31_EMULATION_STAMP}" CONTENT "${FORCE_RTIP31_EMULATION}\n")
+
 	# with --nvidia, compile.py also exports those fatbins to Debug and Release.
 	set(KERNEL_NV_COMP "")
 	if(NOT FORCE_DISABLE_CUDA)
@@ -446,21 +461,22 @@ if(PRECOMPILE)
 	${CMAKE_SOURCE_DIR}/hiprt/impl/NodeList.h
 	${CMAKE_SOURCE_DIR}/hiprt/impl/MemoryArena.h
 	${CMAKE_SOURCE_DIR}/hiprt/impl/Obb.h
+	${CMAKE_SOURCE_DIR}/hiprt/impl/Rtip31Emulation.h
 	${CMAKE_SOURCE_DIR}/hiprt/hiprt_types.h
 	${CMAKE_SOURCE_DIR}/hiprt/hiprt_common.h
 	)
 
-	message(">> add_custom_command: ${Python3_EXECUTABLE} compile.py ${CUDA_OPTION} --hipSdkPath \"${HIP_FINAL_PATH}\"")
+	message(">> add_custom_command: ${Python3_EXECUTABLE} compile.py ${CUDA_OPTION} ${RTIP31_EMULATION_OPTION} --hipSdkPath \"${HIP_FINAL_PATH}\"")
 	add_custom_command(
 			# every file compile.py exports, so that any missing one triggers a rebuild.
 			OUTPUT  ${KERNEL_HIPRT_COMP}       ${KERNEL_OROCHI_COMP}       ${KERNEL_HIPRT_BC}
 					${KERNEL_HIPRT_COMP_DEBUG} ${KERNEL_OROCHI_COMP_DEBUG} ${KERNEL_HIPRT_BC_DEBUG}
 					${KERNEL_NV_COMP}
-			COMMAND ${Python3_EXECUTABLE} compile.py ${CUDA_OPTION} --hipSdkPath ${HIP_FINAL_PATH}
+			COMMAND ${Python3_EXECUTABLE} compile.py ${CUDA_OPTION} ${RTIP31_EMULATION_OPTION} --hipSdkPath ${HIP_FINAL_PATH}
 			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bitcodes
 			COMMENT "Precompiling kernels via compile.py"
 			VERBATIM
-			DEPENDS ${bvh_source}
+			DEPENDS ${bvh_source} ${RTIP31_EMULATION_STAMP}
 		)
 		
 	# create the 'precompile_kernels' project
@@ -475,10 +491,10 @@ if(PRECOMPILE)
 		${CMAKE_SOURCE_DIR}/test/bitcodes/unit_test.cpp
 		)
 		
-		message(">> add_custom_command: ${Python3_EXECUTABLE} precompile_bitcode.py ${CUDA_OPTION} --hipSdkPath \"${HIP_FINAL_PATH}\"")
+		message(">> add_custom_command: ${Python3_EXECUTABLE} precompile_bitcode.py ${CUDA_OPTION} ${RTIP31_EMULATION_OPTION} --hipSdkPath \"${HIP_FINAL_PATH}\"")
 		add_custom_command(
 			OUTPUT ${KERNEL_UNITTEST_COMP} ${KERNEL_UNITTEST_COMP_DEBUG}
-			COMMAND ${Python3_EXECUTABLE} precompile_bitcode.py ${CUDA_OPTION} --hipSdkPath ${HIP_FINAL_PATH}
+			COMMAND ${Python3_EXECUTABLE} precompile_bitcode.py ${CUDA_OPTION} ${RTIP31_EMULATION_OPTION} --hipSdkPath ${HIP_FINAL_PATH}
 			DEPENDS ${KERNEL_HIPRT_COMP}  # Ensure compile.py has already run.
 			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/scripts/bitcodes
 			COMMENT "Precompiling unit tests kernels via precompile_bitcode.py"

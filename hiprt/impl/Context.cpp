@@ -1007,6 +1007,8 @@ std::string Context::getDriverVersion() const
 
 uint32_t Context::getRtip() const
 {
+	if constexpr ( Rtip31Emulation ) return 31;
+
 	std::string deviceName = getDeviceName();
 	std::string archName   = getGcnArchName();
 

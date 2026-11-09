@@ -145,7 +145,7 @@ void PlocBuilder::build(
 	using Header = typename std::conditional<isInstanceNode<PrimitiveNode>(), SceneHeader, GeomHeader>::type;
 
 	const uint32_t maxBoxNodeCount =
-		static_cast<uint32_t>( getMaxBoxNodeCount<BoxNode, PrimitiveNode>( primitives.getCount() ) );
+		static_cast<uint32_t>( getMaxBoxNodeCount<BoxNode, PrimitiveNode>( primitives.getCount(), buildOptions.buildFlags ) );
 	const uint32_t maxPrimNodeCount =
 		static_cast<uint32_t>( getMaxPrimNodeCount<PrimitiveNode>( context.getRtip(), primitives.getCount() ) );
 
@@ -339,7 +339,9 @@ void PlocBuilder::build(
 			"ComputeFatLeaves_" + binNodeParam,
 			opts,
 			GET_ARG_LIST( BvhBuilderKernels ) );
-		computeFatLeaves.setArgs( { primitives.getCount(), parentAddrs, scratchNodes, triangleCounts, updateCounters } );
+		const uint32_t maxFatLeafSize = getMaxFatLeafSize( context.getRtip(), buildOptions.buildFlags );
+		computeFatLeaves.setArgs(
+			{ primitives.getCount(), parentAddrs, scratchNodes, triangleCounts, updateCounters, maxFatLeafSize } );
 		timer.measure( ComputeFatLeavesTime, [&]() { computeFatLeaves.launch( primitives.getCount(), stream ); } );
 	}
 
@@ -359,8 +361,28 @@ void PlocBuilder::build(
 		"Collapse_" + primNodeBinNodeParam,
 		opts,
 		GET_ARG_LIST( BvhBuilderKernels ) );
-	collapseKernel.setArgs(
-		{ maxBoxNodeCount, primitives.getCount(), scratchNodes, references, header, boxNodes, taskQueue, referenceIndices } );
+	const uint32_t nodeMerging = isNodeMergingEnabled( buildOptions.buildFlags ) ? 1 : 0;
+	if constexpr ( isTrianglePacketNode<PrimitiveNode>() )
+		collapseKernel.setArgs(
+			{ maxBoxNodeCount,
+	          primitives.getCount(),
+	          scratchNodes,
+	          references,
+	          header,
+	          boxNodes,
+	          taskQueue,
+	          referenceIndices,
+	          nodeMerging } );
+	else
+		collapseKernel.setArgs(
+			{ maxBoxNodeCount,
+	          primitives.getCount(),
+	          scratchNodes,
+	          references,
+	          header,
+	          boxNodes,
+	          taskQueue,
+	          referenceIndices } );
 	timer.measure( CollapseTime, [&]() { collapseKernel.launch( context.getBranchingFactor() * maxBoxNodeCount, stream ); } );
 
 	uint32_t boxNodeCount{};

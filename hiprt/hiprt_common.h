@@ -181,9 +181,17 @@ constexpr uint32_t DefaultAlignment          = 64u;
 constexpr uint32_t NoRotationIndex           = 127u;
 constexpr uint32_t InstanceIDBits            = 24u;
 
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+constexpr bool Rtip31Emulation = true;
+#else
+constexpr bool Rtip31Emulation = false;
+#endif
+
 #ifdef __KERNELCC__
 #ifndef HIPRT_RTIP
-#if __gfx1200__ || __gfx1201__
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+#define HIPRT_RTIP 31
+#elif __gfx1200__ || __gfx1201__
 // to enable full hardware support, we need either the Rocm 6.4+ on Windows, or the Rocm 7+ on Linux
 #if ( HIP_VERSION_MAJOR >= 7 ) || \
 	( defined( HIPCC_OS_WINDOWS ) && ( ( HIP_VERSION_MAJOR > 6 ) || ( HIP_VERSION_MAJOR == 6 && HIP_VERSION_MINOR >= 4 ) ) )

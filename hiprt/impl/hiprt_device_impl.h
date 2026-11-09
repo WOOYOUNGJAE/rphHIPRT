@@ -34,12 +34,15 @@
 #include <hiprt/impl/Transform.h>
 #include <hiprt/impl/Triangle.h>
 #include <hiprt/hiprt_device.h>
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+#include <hiprt/impl/Rtip31Emulation.h>
+#endif
 
-#if HIPRT_RTIP >= 11
+#if HIPRT_RTIP >= 11 && !defined( HIPRT_FORCE_RTIP31_EMULATION )
 extern "C" __device__ float __ocml_native_recip_f32( float );
 #endif
 
-#if HIPRT_RTIP >= 31
+#if HIPRT_RTIP >= 31 && !defined( HIPRT_FORCE_RTIP31_EMULATION )
 using hip_float3 = float __attribute__( ( ext_vector_type( 3 ) ) );
 #endif
 
@@ -76,7 +79,7 @@ enum
 
 HIPRT_DEVICE HIPRT_INLINE float3 rcp( const float3& a )
 {
-#if HIPRT_RTIP >= 11
+#if HIPRT_RTIP >= 11 && !defined( HIPRT_FORCE_RTIP31_EMULATION )
 	return float3{ __ocml_native_recip_f32( a.x ), __ocml_native_recip_f32( a.y ), __ocml_native_recip_f32( a.z ) };
 #else
 	return 1.0f / a;
@@ -322,6 +325,9 @@ HIPRT_DEVICE HIPRT_INLINE bool TraversalBase<Stack, TraversalType>::testInternal
 	SORT( result[2], result[3], s2.x, s3.x )
 	SORT( result[1], result[2], s1.x, s2.x )
 #undef SORT
+#elif defined( HIPRT_FORCE_RTIP31_EMULATION )
+	uint32_t result[BoxNode::BranchingFactor];
+	rtip31::intersectBoxNode( nodes[getNodeAddr( nodeIndex )], ray, invD, static_cast<uint32_t>( m_hint ), result );
 #elif HIPRT_RTIP >= 31
 	hip_float3 dummy0, dummy1;
 	auto       result = __builtin_amdgcn_image_bvh8_intersect_ray(
@@ -598,7 +604,7 @@ HIPRT_DEVICE HIPRT_INLINE bool TraversalBase<Stack, TraversalType>::testTriangle
 	const rtip11::TrianglePairNode& node = nodes[leafAddr];
 	if ( node.getPrimIndex( 0 ) == node.getPrimIndex( 1 ) && leafType == TriangleType + 1 ) return false;
 	bool hasHit = false;
-#if HIPRT_RTIP < 11
+#if HIPRT_RTIP < 11 || defined( HIPRT_FORCE_RTIP31_EMULATION )
 	hasHit =
 		node.m_triPair.fetchTriangle( leafType & 1 ).intersect( ray, hit.uv, hit.t, node.m_flags >> ( ( leafType & 1 ) * 8 ) );
 	if ( hasHit )
@@ -641,6 +647,10 @@ HIPRT_DEVICE HIPRT_INLINE uint32_t TraversalBase<Stack, TraversalType>::testTria
 	bool&                                              rangeEnd )
 {
 #if HIPRT_RTIP >= 31
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+	uint32_t result[rtip31::PairResultSize];
+	rtip31::intersectTrianglePair( ray, nodes[leafAddr], triPairIndex, result );
+#else
 	hip_float3 dummy0, dummy1;
 	auto       result = __builtin_amdgcn_image_bvh8_intersect_ray(
         encodeBaseAddr( nodes ),
@@ -652,6 +662,7 @@ HIPRT_DEVICE HIPRT_INLINE uint32_t TraversalBase<Stack, TraversalType>::testTria
         { m_descriptor.x, m_descriptor.y, m_descriptor.z, m_descriptor.w },
         &dummy0,
         &dummy1 );
+#endif
 
 	uint32_t hitMask = 0;
 	{
@@ -717,7 +728,7 @@ HIPRT_DEVICE HIPRT_INLINE hiprtHit GeomTraversal<Stack, PrimitiveNode, Traversal
 {
 	hiprtRay ray = this->m_ray;
 	float3   invD;
-	if constexpr ( Rtip < 31 ) invD = rcp( this->m_ray.direction );
+	if constexpr ( Rtip < 31 || Rtip31Emulation ) invD = rcp( this->m_ray.direction );
 
 	if constexpr ( TraversalType == hiprtTraversalTerminateAtAnyHit )
 	{
@@ -850,7 +861,7 @@ HIPRT_DEVICE HIPRT_INLINE hiprtHit SceneTraversal<Stack, InstanceStack, Traversa
 
 	hiprtRay ray = this->m_ray;
 	float3   invD;
-	if constexpr ( Rtip < 31 )
+	if constexpr ( Rtip < 31 || Rtip31Emulation )
 	{
 		if ( instanceId() == InvalidValue ) invD = rcp( this->m_ray.direction );
 	}
@@ -1022,7 +1033,14 @@ HIPRT_DEVICE HIPRT_INLINE bool SceneTraversal<Stack, InstanceStack, TraversalTyp
 	{
 		if ( instanceNode.m_static != 0 )
 		{
-#if HIPRT_RTIP >= 31
+#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+			float3 origin, direction;
+			if ( !rtip31::intersectInstanceNode( instanceNode, ray, static_cast<uint32_t>( this->m_hint ), origin, direction ) )
+				return false;
+
+			ray.origin    = origin;
+			ray.direction = direction;
+#elif HIPRT_RTIP >= 31
 			hip_float3 origin, direction;
 			auto       result = __builtin_amdgcn_image_bvh8_intersect_ray(
                 encodeBaseAddr( m_instanceNodes ),
@@ -1048,7 +1066,7 @@ HIPRT_DEVICE HIPRT_INLINE bool SceneTraversal<Stack, InstanceStack, TraversalTyp
 			const Transform tr( m_frames, instanceNode.m_transform.frameIndex, instanceNode.m_transform.frameCount );
 			ray = tr.transformRay( ray, m_time );
 		}
-		if constexpr ( Rtip < 31 ) invD = rcp( ray.direction );
+		if constexpr ( Rtip < 31 || Rtip31Emulation ) invD = rcp( ray.direction );
 	}
 
 	return true;
@@ -1060,7 +1078,7 @@ SceneTraversal<Stack, InstanceStack, TraversalType>::restoreRay( hiprtRay& ray, 
 {
 	ray.origin    = this->m_ray.origin;
 	ray.direction = this->m_ray.direction;
-	if constexpr ( Rtip < 31 ) invD = rcp( this->m_ray.direction );
+	if constexpr ( Rtip < 31 || Rtip31Emulation ) invD = rcp( this->m_ray.direction );
 }
 
 template <typename Stack, typename InstanceStack, hiprtTraversalType TraversalType>

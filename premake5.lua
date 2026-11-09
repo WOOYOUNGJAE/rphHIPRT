@@ -16,6 +16,11 @@ newoption {
 }
 
 newoption {
+    trigger = "forceRtip31Emulation",
+    description = "Use the RTIP 3.1 BVH format on every GPU, and trace it in software"
+}
+
+newoption {
     trigger = "hiprtew",
     description = "Use hiprtew"
 }
@@ -70,6 +75,10 @@ workspace "hiprt"
     -- this define is to identify that we are on the public repository of HIPRT.
     -- it helps AMD to maintain both a public and a private repo for experimentation.
     defines {"HIPRT_PUBLIC_REPO"}
+
+    if _OPTIONS["forceRtip31Emulation"] then
+        defines {"HIPRT_FORCE_RTIP31_EMULATION"}
+    end
     
     
 
@@ -98,6 +107,9 @@ workspace "hiprt"
 
     if _OPTIONS["precompile"] then
 		cmdExec = "cd ./scripts/bitcodes/ && python compile.py"
+		if _OPTIONS["forceRtip31Emulation"] then
+			cmdExec = cmdExec .. " --forceRtip31Emulation"
+		end
 		if hip_final_path ~= nil then
 			cmdExec = cmdExec .. " --hipSdkPath \"" .. hip_final_path .. "\""
 		end

@@ -182,7 +182,8 @@ HIPRT_DEVICE HIPRT_INLINE void build(
 		updateCounters[index]    = 0;
 		ComputeParentAddrs( index, primCount, rootAddr, scratchNodes, parentAddrs );
 		__syncthreads();
-		ComputeFatLeaves( index, primCount, parentAddrs, scratchNodes, triangleCounts, updateCounters );
+		ComputeFatLeaves(
+			index, primCount, parentAddrs, scratchNodes, triangleCounts, updateCounters, getMaxFatLeafSize( Rtip ) );
 		__syncthreads();
 	}
 

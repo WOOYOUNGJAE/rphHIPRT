@@ -52,6 +52,14 @@ Add the option `--bitcode` in premake, or `-DBITCODE=ON` in cmake to enable prec
 - Or pass `--precompile` to premake, or `-DPRECOMPILE=ON` in cmake . It executes the `compile.py` during premake. Note that you cannot do it in git bash on windows (because of hipcc...)
 
 
+### Forcing the RTIP 3.1 Emulation
+Add the option `--forceRtip31Emulation` in premake, or `-DFORCE_RTIP31_EMULATION=ON` in cmake, to use the RTIP 3.1 BVH format on every GPU and to trace it in software instead of with the ray tracing instructions. The option is off by default.
+
+Kernels that an application compiles itself for `hiprtBuildTraceKernelsFromBitcode` must also define `HIPRT_FORCE_RTIP31_EMULATION` (`-DHIPRT_FORCE_RTIP31_EMULATION`) on GPUs other than the Radeon RX 9000 series. `hiprtBuildTraceKernels` passes it automatically.
+
+In such a build, the build flag `hiprtBuildFlagBitEnableNodeMerging` merges sibling leaf-only nodes of triangle geometries into one node. The flag has no effect without `FORCE_RTIP31_EMULATION`, because merged nodes rely on the traversal skipping slots that point to the same node.
+
+
 ## Running Unit Tests
 
 There are three types of tests. 

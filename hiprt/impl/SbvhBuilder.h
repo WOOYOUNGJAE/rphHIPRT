@@ -156,8 +156,8 @@ template <typename BuildInput>
 	const bool  kdops = context.getRtip() >= 31 && !( buildOptions.buildFlags & hiprtBuildFlagBitDisableOrientedBoundingBoxes );
 	const float alpha = !spatialSplits ? 1.0f : Alpha;
 	const size_t maxReferenceCount = alpha * count;
-	const size_t boxNodeCount =
-		getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount );
+	const size_t boxNodeCount = getMaxBoxNodeCount(
+		buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount, buildOptions.buildFlags );
 	const size_t size =
 		RoundUp( sizeof( Aabb ), DefaultAlignment ) + RoundUp( maxReferenceCount * sizeof( Task ), DefaultAlignment ) +
 		RoundUp( maxReferenceCount * sizeof( ScratchNode ), DefaultAlignment ) +
@@ -166,7 +166,7 @@ template <typename BuildInput>
 		3 * RoundUp( sizeof( uint32_t ), DefaultAlignment ) +
 		( !spatialSplits ? 1 : 2 ) * RoundUp( ( maxReferenceCount / 2 ) * sizeof( Bin ) * 3 * MinBinCount, DefaultAlignment );
 	const size_t obbSize = kdops ? RoundUp( boxNodeCount * sizeof( Kdop ), DefaultAlignment ) +
-	                                   RoundUp( boxNodeCount * sizeof( uint32_t ), DefaultAlignment )
+	                                   2 * RoundUp( ( boxNodeCount + 1 ) * sizeof( uint32_t ), DefaultAlignment )
 	                             : 0;
 	return std::max( size, obbSize );
 }
@@ -186,7 +186,8 @@ void SbvhBuilder::build(
 	bool           spatialSplits     = !( buildOptions.buildFlags & hiprtBuildFlagBitDisableSpatialSplits );
 	const float    alpha             = spatialSplits ? Alpha : 1.0f;
 	const uint32_t maxReferenceCount = alpha * primitives.getCount();
-	const uint32_t maxBoxNodeCount   = static_cast<uint32_t>( getMaxBoxNodeCount<BoxNode, PrimitiveNode>( maxReferenceCount ) );
+	const uint32_t maxBoxNodeCount =
+		static_cast<uint32_t>( getMaxBoxNodeCount<BoxNode, PrimitiveNode>( maxReferenceCount, buildOptions.buildFlags ) );
 	const uint32_t maxPrimNodeCount =
 		static_cast<uint32_t>( getMaxPrimNodeCount<PrimitiveNode>( context.getRtip(), maxReferenceCount ) );
 
@@ -511,7 +512,9 @@ void SbvhBuilder::build(
 			"ComputeFatLeaves_" + binNodeParam,
 			opts,
 			GET_ARG_LIST( BvhBuilderKernels ) );
-		computeFatLeaves.setArgs( { referenceCount, parentAddrs, scratchNodes, triangleCounts, updateCounters } );
+		const uint32_t maxFatLeafSize = getMaxFatLeafSize( context.getRtip(), buildOptions.buildFlags );
+		computeFatLeaves.setArgs(
+			{ referenceCount, parentAddrs, scratchNodes, triangleCounts, updateCounters, maxFatLeafSize } );
 		timer.measure( ComputeFatLeavesTime, [&]() { computeFatLeaves.launch( referenceCount, stream ); } );
 	}
 
@@ -531,8 +534,21 @@ void SbvhBuilder::build(
 		"Collapse_" + primNodeBinNodeParam,
 		opts,
 		GET_ARG_LIST( BvhBuilderKernels ) );
-	collapseKernel.setArgs(
-		{ maxBoxNodeCount, referenceCount, scratchNodes, references, header, boxNodes, taskQueue, taskIndices } );
+	const uint32_t nodeMerging = isNodeMergingEnabled( buildOptions.buildFlags ) ? 1 : 0;
+	if constexpr ( isTrianglePacketNode<PrimitiveNode>() )
+		collapseKernel.setArgs(
+			{ maxBoxNodeCount,
+	          referenceCount,
+	          scratchNodes,
+	          references,
+	          header,
+	          boxNodes,
+	          taskQueue,
+	          taskIndices,
+	          nodeMerging } );
+	else
+		collapseKernel.setArgs(
+			{ maxBoxNodeCount, referenceCount, scratchNodes, references, header, boxNodes, taskQueue, taskIndices } );
 	timer.measure( CollapseTime, [&]() { collapseKernel.launch( context.getBranchingFactor() * maxBoxNodeCount, stream ); } );
 
 	uint32_t boxNodeCount{};
@@ -574,16 +590,29 @@ void SbvhBuilder::build(
 		MemoryArena obbMemoryArena(
 			temporaryMemoryArena.getData(), temporaryMemoryArena.getStorageSize(), temporaryMemoryArena.getAlignment() );
 		uint32_t* updateCounters = obbMemoryArena.allocate<uint32_t>( boxNodeCount );
-		Kdop*     kdops          = obbMemoryArena.allocate<Kdop>( boxNodeCount );
+		Kdop*     kdops          = obbMemoryArena.allocate<Kdop>( nodeMerging != 0 ? maxBoxNodeCount : boxNodeCount );
 		checkOro( oroMemsetD8Async(
 			reinterpret_cast<oroDeviceptr>( updateCounters ), 0, sizeof( uint32_t ) * boxNodeCount, stream ) );
+
+		uint32_t* memberKdopBases = nullptr;
+		if ( nodeMerging != 0 )
+		{
+			memberKdopBases = obbMemoryArena.allocate<uint32_t>( boxNodeCount + 1 );
+			checkOro( oroMemsetD8Async(
+				reinterpret_cast<oroDeviceptr>( memberKdopBases ), 0, sizeof( uint32_t ) * ( boxNodeCount + 1 ), stream ) );
+		}
+
 		Kernel fitOrientedBoundsKernel = compiler.getKernel(
 			context,
 			Utility::getRootDir() / "hiprt/impl/BvhBuilderKernels.h",
 			"FitOrientedBounds_" + containerPrimNodeBoxNodeParam,
 			opts,
 			GET_ARG_LIST( BvhBuilderKernels ) );
-		fitOrientedBoundsKernel.setArgs( { header, primitives, primNodes, boxNodes, kdops, updateCounters } );
+		if constexpr ( isTrianglePacketNode<PrimitiveNode>() )
+			fitOrientedBoundsKernel.setArgs(
+				{ header, primitives, primNodes, boxNodes, kdops, updateCounters, memberKdopBases } );
+		else
+			fitOrientedBoundsKernel.setArgs( { header, primitives, primNodes, boxNodes, kdops, updateCounters } );
 		timer.measure(
 			FitOrientedBoundsTime, [&]() { fitOrientedBoundsKernel.launch( context.getWarpSize() * boxNodeCount, stream ); } );
 	}

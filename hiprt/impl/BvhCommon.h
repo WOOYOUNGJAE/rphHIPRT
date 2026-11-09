@@ -78,6 +78,21 @@ HIPRT_INLINE HIPRT_HOST_DEVICE constexpr uint32_t getMaxFatLeafSize( const uint3
 	return 1;
 }
 
+// Node merging only combines box children, which must be leaf-only and fit in one node together. A fat leaf is not a box
+// child, so the fat leaf size is lowered to leave small subtrees as box children that can be merged.
+static constexpr uint32_t NodeMergingMaxFatLeafSize = 2;
+
+[[nodiscard]] HIPRT_INLINE HIPRT_HOST_DEVICE constexpr bool isNodeMergingEnabled( const hiprtBuildFlags buildFlags )
+{
+	return Rtip31Emulation && ( buildFlags & hiprtBuildFlagBitEnableNodeMerging ) != 0;
+}
+
+HIPRT_INLINE HIPRT_HOST_DEVICE constexpr uint32_t getMaxFatLeafSize( const uint32_t rtip, const hiprtBuildFlags buildFlags )
+{
+	if ( isNodeMergingEnabled( buildFlags ) ) return NodeMergingMaxFatLeafSize;
+	return getMaxFatLeafSize( rtip );
+}
+
 HIPRT_INLINE HIPRT_HOST_DEVICE Aabb getBoxNodeAabb( const uint32_t rtip, const void* boxNode )
 {
 	if ( rtip >= 31 )
@@ -121,19 +136,28 @@ getMaxPrimNodeCount( const hiprtGeometryBuildInput& buildInput, const uint32_t r
 }
 
 template <typename BoxNode, typename PrimitiveNode>
-[[nodiscard]] HIPRT_HOST_DEVICE HIPRT_INLINE size_t getMaxBoxNodeCount( const size_t count )
+[[nodiscard]] HIPRT_HOST_DEVICE HIPRT_INLINE size_t
+getMaxBoxNodeCount( const size_t count, const hiprtBuildFlags buildFlags = 0u )
 {
-	const uint32_t maxFatLeafSize = is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> ? PrimitiveNode::MaxFatLeafSize : 1;
+	uint32_t maxFatLeafSize = is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> ? PrimitiveNode::MaxFatLeafSize : 1;
+	if ( is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> && isNodeMergingEnabled( buildFlags ) )
+		maxFatLeafSize = NodeMergingMaxFatLeafSize;
 	return getMaxBoxNodeCount( count, BoxNode::BranchingFactor, maxFatLeafSize );
 }
 
 template <typename BuildInput>
 [[nodiscard]] HIPRT_HOST_DEVICE HIPRT_INLINE size_t
-getMaxBoxNodeCount( const BuildInput& buildInput, const uint32_t rtip, const uint32_t branchingFactor, const size_t count )
+getMaxBoxNodeCount(
+	const BuildInput&     buildInput,
+	const uint32_t        rtip,
+	const uint32_t        branchingFactor,
+	const size_t          count,
+	const hiprtBuildFlags buildFlags = 0u )
 {
 	uint32_t maxFatLeafSize = 1;
 	if constexpr ( is_same_v<BuildInput, hiprtGeometryBuildInput> )
-		if ( buildInput.type == hiprtPrimitiveTypeTriangleMesh && rtip >= 31 ) maxFatLeafSize = getMaxFatLeafSize( rtip );
+		if ( buildInput.type == hiprtPrimitiveTypeTriangleMesh && rtip >= 31 )
+			maxFatLeafSize = getMaxFatLeafSize( rtip, buildFlags );
 	return getMaxBoxNodeCount( count, branchingFactor, maxFatLeafSize );
 }
 

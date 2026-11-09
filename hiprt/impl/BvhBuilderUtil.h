@@ -316,3 +316,12 @@ HIPRT_DEVICE HIPRT_INLINE void sync_warp()
 	__syncwarp();
 #endif
 }
+
+// For code where only the lanes of one subwarp are guaranteed to reach the same point.
+HIPRT_DEVICE HIPRT_INLINE void
+sync_subwarp( [[maybe_unused]] const uint32_t subwarpIndex, [[maybe_unused]] const uint32_t lanesPerSubwarp )
+{
+#if defined( __CUDACC__ )
+	__syncwarp( ( ( 1u << lanesPerSubwarp ) - 1u ) << ( subwarpIndex * lanesPerSubwarp ) );
+#endif
+}

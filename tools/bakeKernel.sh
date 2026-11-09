@@ -35,6 +35,7 @@ $PYTHON_BIN tools/stringify.py ./hiprt/impl/InstanceList.h 20220318  >> hiprt/ca
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/MortonCode.h 20220318  >> hiprt/cache/Kernels.h
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/TriangleMesh.h 20220318  >> hiprt/cache/Kernels.h
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/Triangle.h 20220318  >> hiprt/cache/Kernels.h
+$PYTHON_BIN tools/stringify.py ./hiprt/impl/Rtip31Emulation.h 20220318  >> hiprt/cache/Kernels.h
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/BvhBuilderUtil.h 20220318  >> hiprt/cache/Kernels.h
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/SbvhCommon.h 20220318  >> hiprt/cache/Kernels.h
 $PYTHON_BIN tools/stringify.py ./hiprt/impl/NodeList.h 20220318  >> hiprt/cache/Kernels.h

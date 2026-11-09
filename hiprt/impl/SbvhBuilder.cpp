@@ -60,8 +60,8 @@ size_t SbvhBuilder::getStorageBufferSize(
 	const size_t maxReferenceCount = alpha * primCount;
 	const size_t primNodeCount     = getMaxPrimNodeCount( buildInput, context.getRtip(), maxReferenceCount );
 	const size_t primNodeSize      = getPrimNodeSize( buildInput, context.getTriangleNodeSize() );
-	const size_t boxNodeCount =
-		getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount );
+	const size_t boxNodeCount = getMaxBoxNodeCount(
+		buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount, buildOptions.buildFlags );
 	return getGeometryStorageBufferSize( primNodeCount, boxNodeCount, primNodeSize, context.getBoxNodeSize() );
 }
 
@@ -71,8 +71,8 @@ size_t SbvhBuilder::getStorageBufferSize(
 	const float  alpha             = buildOptions.buildFlags & hiprtBuildFlagBitDisableSpatialSplits ? 1.0f : Alpha;
 	const size_t primCount         = buildInput.instanceCount;
 	const size_t maxReferenceCount = alpha * primCount;
-	const size_t boxNodeCount =
-		getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount );
+	const size_t boxNodeCount = getMaxBoxNodeCount(
+		buildInput, context.getRtip(), context.getBranchingFactor(), maxReferenceCount, buildOptions.buildFlags );
 	return getSceneStorageBufferSize(
 		primCount,
 		maxReferenceCount,

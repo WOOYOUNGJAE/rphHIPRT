@@ -25,6 +25,12 @@ vsVersionRange = None
 # use the resolved VS install's default toolset.
 vcToolsetVersion = None
 
+# Set by --forceRtip31Emulation.
+forceRtip31Emulation = False
+
+def getRtip31EmulationDefine():
+    return ' -DHIPRT_FORCE_RTIP31_EMULATION' if forceRtip31Emulation else ''
+
 def which(program, sufix=''):
     sufix = '.' + sufix
     if isLinux():
@@ -122,12 +128,15 @@ def compileAmd():
         os.environ["PATH"] = os.path.join(vcpath, "bin", "Hostx64", "x64") + os.pathsep + os.environ.get("PATH", "")
         print("Pinned MSVC toolset: " + vcpath)
 
+    # The emulated traversal depends on NaN and infinity handling, which fast math would optimize away.
+    traversalFastMath = '' if forceRtip31Emulation else ' -ffast-math'
+
     dst = 'hiprt' + hiprt_ver + '_' + hip_version + '_amd_lib' + postfix
-    cmd = hipccpath + ' -x hip ../../hiprt/impl/hiprt_kernels_bitcode.h -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING ' + osDef + ' -ffast-math' + parallel_jobs_flag + ' -o ' + dst
+    cmd = hipccpath + ' -x hip ../../hiprt/impl/hiprt_kernels_bitcode.h -O3 -std=c++17 ' + targets + ' -fgpu-rdc -c --gpu-bundle-output -c -emit-llvm -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING ' + osDef + getRtip31EmulationDefine() + traversalFastMath + parallel_jobs_flag + ' -o ' + dst
     compileScript(cmd, dst)
 
     dst = 'hiprt' + hiprt_ver + '_' + hip_version + '_amd.hipfb'
-    cmd = hipccpath + ' -x hip ../../hiprt/impl/hiprt_kernels.h -O3 -std=c++17 ' + targets + ' -mllvm -amdgpu-early-inline-all=false -mllvm -amdgpu-function-calls=true --genco -I../../ -DHIPRT_BITCODE_LINKING ' + osDef +  ' -ffast-math' + parallel_jobs_flag + ' -o ' + dst
+    cmd = hipccpath + ' -x hip ../../hiprt/impl/hiprt_kernels.h -O3 -std=c++17 ' + targets + ' -mllvm -amdgpu-early-inline-all=false -mllvm -amdgpu-function-calls=true --genco -I../../ -DHIPRT_BITCODE_LINKING ' + osDef + getRtip31EmulationDefine() +  ' -ffast-math' + parallel_jobs_flag + ' -o ' + dst
     compileScript(cmd, dst)
 
     dst = 'oro_compiled_kernels.hipfb'
@@ -163,12 +172,15 @@ def compileNv():
         ccbin = '"{}"'.format(ccbin)
         ccbin = '-ccbin=' + ccbin + ' '
 
+    # The emulated traversal depends on NaN and infinity handling, which fast math would optimize away.
+    traversalFastMath = '' if forceRtip31Emulation else ' --use_fast_math'
+
     dst = 'hiprt' + hiprt_ver + '_nv_lib.fatbin'
-    cmd = 'nvcc -x cu ../../hiprt/impl/hiprt_kernels_bitcode.h -O3 ' + ccbin + '-std=c++17 -fatbin -arch=all --device-c -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING --use_fast_math --threads 0 -o ' + dst 
+    cmd = 'nvcc -x cu ../../hiprt/impl/hiprt_kernels_bitcode.h -O3 ' + ccbin + '-std=c++17 -fatbin -arch=all --device-c -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING' + getRtip31EmulationDefine() + traversalFastMath + ' --threads 0 -o ' + dst
     compileScript(cmd, dst)
 
     dst = 'hiprt' + hiprt_ver + '_nv.fatbin'
-    cmd = 'nvcc -x cu ../../hiprt/impl/hiprt_kernels.h -O3 ' + ccbin + '-std=c++17 -fatbin -arch=all -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING --use_fast_math --threads 0 -o ' + dst
+    cmd = 'nvcc -x cu ../../hiprt/impl/hiprt_kernels.h -O3 ' + ccbin + '-std=c++17 -fatbin -arch=all -I../../contrib/Orochi/ -I../../ -DHIPRT_BITCODE_LINKING' + getRtip31EmulationDefine() + ' --use_fast_math --threads 0 -o ' + dst
     compileScript(cmd, dst)
 
     dst = 'oro_compiled_kernels.fatbin'
@@ -190,6 +202,7 @@ parser = optparse.OptionParser()
 parser.add_option('-a', '--amd', dest='amd_platform', help='Compile for AMD', action='store_true', default=True)
 parser.add_option('--no-amd'   , dest='amd_platform', help='Do not compile for AMD', action='store_false' )
 parser.add_option('-n', '--nvidia', dest='nv_platform', help='Compile for Nvidia', action='store_true', default=False)
+parser.add_option('--forceRtip31Emulation', dest='forceRtip31Emulation', help='Use the RTIP 3.1 BVH format on every GPU, and trace it in software', action='store_true', default=False)
 
 # Add the optional hipSdkPath argument
 parser.add_option(
@@ -222,6 +235,8 @@ parser.add_option(
     )
 
 (options, args) = parser.parse_args()
+
+forceRtip31Emulation = options.forceRtip31Emulation
 
 
 # Resolve the requested Visual Studio installation / MSVC toolset (CLI args, else

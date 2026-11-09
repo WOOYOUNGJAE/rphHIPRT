@@ -738,6 +738,7 @@ hiprtError hiprtTest::buildTraceKernelsFromBitcode(
 		options.push_back( "--use_fast_math" );
 	}
 	options.push_back( "-std=c++17" );
+	if constexpr ( hiprt::Rtip31Emulation ) options.push_back( "-DHIPRT_FORCE_RTIP31_EMULATION" );
 
 	std::string includePath = "-I" + getRootDir().string();
 	options.push_back( includePath.c_str() );

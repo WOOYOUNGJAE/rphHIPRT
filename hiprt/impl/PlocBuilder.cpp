@@ -68,7 +68,8 @@ size_t PlocBuilder::getStorageBufferSize(
 	const size_t primCount     = getPrimCount( buildInput );
 	const size_t primNodeCount = getMaxPrimNodeCount( buildInput, context.getRtip(), primCount );
 	const size_t primNodeSize  = getPrimNodeSize( buildInput, context.getTriangleNodeSize() );
-	const size_t boxNodeCount  = getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), primCount );
+	const size_t boxNodeCount =
+		getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), primCount, buildOptions.buildFlags );
 	return getGeometryStorageBufferSize( primNodeCount, boxNodeCount, primNodeSize, context.getBoxNodeSize() );
 }
 
@@ -76,7 +77,8 @@ size_t PlocBuilder::getStorageBufferSize(
 	const Context& context, const hiprtSceneBuildInput& buildInput, [[maybe_unused]] const hiprtBuildOptions buildOptions )
 {
 	const size_t primCount    = buildInput.instanceCount;
-	const size_t boxNodeCount = getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), primCount );
+	const size_t boxNodeCount =
+		getMaxBoxNodeCount( buildInput, context.getRtip(), context.getBranchingFactor(), primCount, buildOptions.buildFlags );
 	return getSceneStorageBufferSize(
 		primCount, primCount, boxNodeCount, context.getInstanceNodeSize(), context.getBoxNodeSize(), buildInput.frameCount );
 }
