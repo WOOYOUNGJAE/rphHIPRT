@@ -143,7 +143,7 @@ enum hiprtBuildFlagBits
 	hiprtBuildFlagBitDisableSpatialSplits         = 1 << 2,
 	hiprtBuildFlagBitDisableTrianglePairing       = 1 << 3,
 	hiprtBuildFlagBitDisableOrientedBoundingBoxes = 1 << 4,
-	hiprtBuildFlagBitEnableNodeMerging            = 1 << 5 // Only effective in builds with FORCE_RTIP31_EMULATION.
+	hiprtBuildFlagBitEnableNodeMerging            = 1 << 5 // RTIP 3.1 only, hardware or FORCE_RTIP31_EMULATION.
 };
 
 /** \brief Geometric primitive type.

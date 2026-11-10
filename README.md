@@ -57,7 +57,7 @@ Add the option `--forceRtip31Emulation` in premake, or `-DFORCE_RTIP31_EMULATION
 
 Kernels that an application compiles itself for `hiprtBuildTraceKernelsFromBitcode` must also define `HIPRT_FORCE_RTIP31_EMULATION` (`-DHIPRT_FORCE_RTIP31_EMULATION`) on GPUs other than the Radeon RX 9000 series. `hiprtBuildTraceKernels` passes it automatically.
 
-In such a build, the build flag `hiprtBuildFlagBitEnableNodeMerging` merges sibling leaf-only nodes of triangle geometries into one node. The flag has no effect without `FORCE_RTIP31_EMULATION`, because merged nodes rely on the traversal skipping slots that point to the same node.
+The build flag `hiprtBuildFlagBitEnableNodeMerging` merges sibling leaf-only nodes of triangle geometries into one node. It works with RTIP 3.1, in the hardware (the ray tracing instruction returns contiguous slots pointing to the same node only once) and in this emulation. The flag has no effect on lower RTIP levels.
 
 
 ## Running Unit Tests

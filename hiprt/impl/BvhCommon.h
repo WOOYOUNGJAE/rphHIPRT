@@ -82,14 +82,15 @@ HIPRT_INLINE HIPRT_HOST_DEVICE constexpr uint32_t getMaxFatLeafSize( const uint3
 // child, so the fat leaf size is lowered to leave small subtrees as box children that can be merged.
 static constexpr uint32_t NodeMergingMaxFatLeafSize = 2;
 
-[[nodiscard]] HIPRT_INLINE HIPRT_HOST_DEVICE constexpr bool isNodeMergingEnabled( const hiprtBuildFlags buildFlags )
+[[nodiscard]] HIPRT_INLINE HIPRT_HOST_DEVICE constexpr bool
+isNodeMergingEnabled( const uint32_t rtip, const hiprtBuildFlags buildFlags )
 {
-	return Rtip31Emulation && ( buildFlags & hiprtBuildFlagBitEnableNodeMerging ) != 0;
+	return rtip >= 31 && ( buildFlags & hiprtBuildFlagBitEnableNodeMerging ) != 0;
 }
 
 HIPRT_INLINE HIPRT_HOST_DEVICE constexpr uint32_t getMaxFatLeafSize( const uint32_t rtip, const hiprtBuildFlags buildFlags )
 {
-	if ( isNodeMergingEnabled( buildFlags ) ) return NodeMergingMaxFatLeafSize;
+	if ( isNodeMergingEnabled( rtip, buildFlags ) ) return NodeMergingMaxFatLeafSize;
 	return getMaxFatLeafSize( rtip );
 }
 
@@ -140,7 +141,7 @@ template <typename BoxNode, typename PrimitiveNode>
 getMaxBoxNodeCount( const size_t count, const hiprtBuildFlags buildFlags = 0u )
 {
 	uint32_t maxFatLeafSize = is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> ? PrimitiveNode::MaxFatLeafSize : 1;
-	if ( is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> && isNodeMergingEnabled( buildFlags ) )
+	if ( is_same_v<PrimitiveNode, rtip31::TrianglePacketNode> && isNodeMergingEnabled( 31, buildFlags ) )
 		maxFatLeafSize = NodeMergingMaxFatLeafSize;
 	return getMaxBoxNodeCount( count, BoxNode::BranchingFactor, maxFatLeafSize );
 }

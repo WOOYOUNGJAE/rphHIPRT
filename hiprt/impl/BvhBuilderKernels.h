@@ -128,7 +128,7 @@ template <typename Node>
 [[nodiscard]] HIPRT_DEVICE HIPRT_INLINE bool isTrackedBoxChild( const Node& node, const uint32_t slot )
 {
 	bool tracked = node.getChildType( slot ) == BoxType;
-	if constexpr ( Rtip31Emulation ) tracked = tracked && !node.isMergedSlot( slot );
+	if constexpr ( Rtip >= 31 ) tracked = tracked && !node.isMergedSlot( slot );
 	return tracked;
 }
 
@@ -138,7 +138,7 @@ template <typename Node>
 getSlotKdopNodeIndex( const Node& node, const uint32_t slot, const uint32_t* memberKdopBases )
 {
 	const uint32_t childIndex = node.getChildIndex( slot );
-	if constexpr ( Rtip31Emulation )
+	if constexpr ( Rtip >= 31 )
 	{
 		if ( memberKdopBases != nullptr && node.isMergedSlot( slot ) )
 		{
@@ -151,9 +151,10 @@ getSlotKdopNodeIndex( const Node& node, const uint32_t slot, const uint32_t* mem
 	return childIndex;
 }
 
-#if defined( HIPRT_FORCE_RTIP31_EMULATION )
-// Lists the leaves of a subtree, the order being the one of a depth-first walk with right children appended. Returns the
-// number of leaves, or maxCount + 1 as soon as the subtree is known to have more than maxCount.
+#if HIPRT_RTIP >= 31
+// Lists the leaf slots of a subtree, the order being the one of a depth-first walk with right children appended. A fat leaf
+// fills one slot, like a primitive range in GPURT. Returns the number of slots, or maxCount + 1 as soon as the subtree is
+// known to fill more than maxCount.
 template <typename BinaryNode>
 [[nodiscard]] HIPRT_DEVICE HIPRT_INLINE uint32_t
 collectLeafReferences( const BinaryNode* binaryNodes, const uint32_t rootIndex, const uint32_t maxCount, uint32_t* indices )
@@ -162,7 +163,7 @@ collectLeafReferences( const BinaryNode* binaryNodes, const uint32_t rootIndex, 
 	indices[0]     = rootIndex;
 	for ( uint32_t i = 0; i < count; )
 	{
-		if ( isLeafNode( indices[i] ) )
+		if ( isLeafNode( indices[i] ) || isFatLeafNode( indices[i] ) )
 		{
 			i++;
 			continue;
@@ -185,7 +186,7 @@ collectLeafReferences( const BinaryNode* binaryNodes, const uint32_t rootIndex, 
 }
 
 // Moves the box children to the first slots, which merged slots must be contiguous for, and greedily groups consecutive
-// leaf-only box children that fit in one node. The size of a box child is the number of slots it would fill.
+// leaf-only box children that fit in one node. The size of a box child is the number of its leaf slots, as in GPURT.
 template <typename BinaryNode>
 HIPRT_DEVICE HIPRT_INLINE void groupBoxChildren(
 	const BinaryNode* binaryNodes,
@@ -936,7 +937,7 @@ HIPRT_DEVICE HIPRT_INLINE void FitOrientedBounds(
 			// K-DOP of the node, the others are stored after the K-DOPs of all the nodes.
 			uint32_t memberCount = 1;
 			uint32_t memberBase  = InvalidValue;
-			if constexpr ( Rtip31Emulation )
+			if constexpr ( Rtip >= 31 )
 			{
 				if ( memberKdopBases != nullptr ) memberCount = hiprt::max( hiprt::popc( node.getLeafStartMask() ), 1u );
 				if ( memberCount > 1 )
@@ -1278,7 +1279,7 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 
 		BinaryNode binaryNode = binaryNodes[getNodeAddr( nodeIndex )];
 
-#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+#if HIPRT_RTIP >= 31
 		Aabb       nodeBox       = binaryNode.m_box;
 		uint32_t   leafStartMask = 0;
 		const bool blockTask     = valid && ( nodeIndex & BlockTaskBit ) != 0;
@@ -1319,12 +1320,18 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 		if constexpr ( isTrianglePacketNode<PrimitiveNode>() )
 			openNodes<isFatLeafNode>( binaryNodes, references, maxChildCount, childCount, childIndex, childBox );
 
-		// open fat leaves for the remaining slots
-		openNodes<isLeafNode>( binaryNodes, references, maxChildCount, childCount, childIndex, childBox );
+		// open fat leaves for the remaining slots, except in a merged node: there a fat leaf fills one slot, which the sizes
+		// of the members are counted with
+#if HIPRT_RTIP >= 31
+		const uint32_t maxLeafChildCount = blockTask ? childCount : maxChildCount;
+#else
+		const uint32_t maxLeafChildCount = maxChildCount;
+#endif
+		openNodes<isLeafNode>( binaryNodes, references, maxLeafChildCount, childCount, childIndex, childBox );
 
 		const bool active = valid && sublaneIndex < childCount;
 
-#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+#if HIPRT_RTIP >= 31
 		const uint32_t subwarpBase    = subwarpIndex * BoxNode::BranchingFactor;
 		uint32_t       numBoxChildren = 0;
 		uint32_t       leaderMask     = 0;
@@ -1428,7 +1435,7 @@ HIPRT_DEVICE HIPRT_INLINE void Collapse(
 			else
 			{
 				if ( fatLeaf ) childIndex = encodeNodeIndex( getNodeAddr( childIndex ), TriangleType );
-#if defined( HIPRT_FORCE_RTIP31_EMULATION )
+#if HIPRT_RTIP >= 31
 				boxNodes[nodeAddr].init(
 					sublaneIndex,
 					parentAddr,

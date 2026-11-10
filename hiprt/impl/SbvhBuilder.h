@@ -534,7 +534,7 @@ void SbvhBuilder::build(
 		"Collapse_" + primNodeBinNodeParam,
 		opts,
 		GET_ARG_LIST( BvhBuilderKernels ) );
-	const uint32_t nodeMerging = isNodeMergingEnabled( buildOptions.buildFlags ) ? 1 : 0;
+	const uint32_t nodeMerging = isNodeMergingEnabled( context.getRtip(), buildOptions.buildFlags ) ? 1 : 0;
 	if constexpr ( isTrianglePacketNode<PrimitiveNode>() )
 		collapseKernel.setArgs(
 			{ maxBoxNodeCount,
